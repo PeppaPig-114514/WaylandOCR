@@ -109,6 +109,13 @@ const OCR_EXIT_NO_TEXT = 2;
 const MIN_SELECTION = 8;
 
 /**
+ * 把原生选区挪到屏幕外时用的坐标。取这么远是为了让任何屏幕内坐标都落在它的
+ * 把手半径和 10px 边距之外——`UIAreaSelector._computeCursorType()` 只会在
+ * 这圈范围里返回缩放/移动光标，脱离这圈就是 CROSSHAIR。
+ */
+const OUT_OF_BOUNDS = -10000;
+
+/**
  * 没有配置 OCR 路径时，按顺序找这几个位置，用第一个真的存在的。
  *
  * 项目目录名和仓库名不一致（仓库叫 WaylandOCR，而安装文档一路用的是
@@ -233,7 +240,8 @@ export default class PrtscOcrExtension extends Extension {
             delete ui[DRAG_ID_PROP];
             delete ui[DRAGGED_PROP];
 
-            // 别把用户的原生界面留在"框被藏掉"的状态里
+            // 别把用户的原生界面留在"框被藏掉 / 被折叠到屏幕外"的状态里
+            this._restoreNativeSelection(ui);
             this._setSelectionVisible(ui, true);
 
             const button = ui[BUTTON_PROP];
@@ -245,6 +253,7 @@ export default class PrtscOcrExtension extends Extension {
 
         this._armed = false;
         this._busy = false;
+        this._savedRect = null;
         this._settings = null;
         logInfo('已停用');
     }
@@ -263,7 +272,10 @@ export default class PrtscOcrExtension extends Extension {
 
         ui[DRAGGED_PROP] = false;
 
-        // 上一次可能停在"等框选"状态、把框藏了；每次打开都还原成原生样子
+        // 上一次可能停在"等框选"状态、把框藏了并折叠了。外观直接还原；
+        // 矩形不用管——原生关界面时会调 _areaSelector.reset()，发现坐标越界
+        // 就会重新铺一个居中的默认选区，我们只要把记录丢掉，别拿旧坐标去覆盖它。
+        this._savedRect = null;
         this._setSelectionVisible(ui, true);
 
         const button = ui[BUTTON_PROP];
@@ -322,12 +334,17 @@ export default class PrtscOcrExtension extends Extension {
             if (!button || !this._armed || this._busy)
                 return;
 
-            // 只是点了一下、没真拖开：别拿几像素的框去识别，继续等他框
+            // 只是点了一下、没真拖开：别拿几像素的框去识别，继续等他框。
+            // 重新折叠一次，光标才会退回干净的十字（这时 _savedRect 已经记着
+            // 最初那个矩形，所以不会被这个几像素的框覆盖掉）。
             if (!this._selectionRect(ui)) {
                 this._setSelectionVisible(ui, false);
+                this._collapseNativeSelection(ui);
                 return;
             }
 
+            // 框有效了，新矩形就是他要的——旧矩形作废，免得之后取消时弹回原位
+            this._savedRect = null;
             this._runOcr(ui, button);
         }));
 
@@ -364,6 +381,64 @@ export default class PrtscOcrExtension extends Extension {
         }
     }
 
+    /**
+     * 把原生选区"折叠"掉——真正的独立框选靠这一步，不是靠 hide()。
+     *
+     * 只 hide() 是没用的：`UIAreaSelector` 是个全屏控件，它的 `_computeCursorType(x, y)`
+     * 完全按 `getGeometry()` 那块矩形的坐标算光标（四个角用 `_handleSize/2` 的半径，
+     * 四条边用 10px 的阈值），跟把手 actor 可不可见毫无关系。所以那个看不见的默认选区，
+     * 它的四条边四个角**照样在改光标**，`_onPress` 还会把它判成"移动/缩放已有选区"——
+     * 用户想画个新框，光标却莫名其妙变成缩放箭头，甚至变成在挪那个看不见的框。
+     *
+     * 原始矩形记在 `this._savedRect` 里，取消时好还原。
+     * 界面关闭时原生会调 `_areaSelector.reset()`，而 reset() 发现坐标越界就会重新
+     * 铺一个居中的默认选区，所以折叠状态不会漏到下一次打开。
+     */
+    _collapseNativeSelection(ui) {
+        const selector = ui._areaSelector;
+        if (!selector)
+            return;
+
+        // 只在第一次折叠时记：反复折叠不会把屏幕外的坐标存进去
+        if (!this._savedRect) {
+            const [x, y, w, h] = selector.getGeometry();
+            if (Number.isFinite(x) && Number.isFinite(y))
+                this._savedRect = [x, y, w, h];
+        }
+
+        this._setSelectorGeometry(selector, OUT_OF_BOUNDS, OUT_OF_BOUNDS, 1, 1);
+    }
+
+    /** 把折叠掉的原生选区还原回原来的位置（取消"请框选…"时用）。 */
+    _restoreNativeSelection(ui) {
+        const selector = ui._areaSelector;
+        const rect = this._savedRect;
+        this._savedRect = null;
+
+        if (!selector || !rect)
+            return;
+
+        this._setSelectorGeometry(selector, ...rect);
+    }
+
+    /**
+     * 直接写 `UIAreaSelector` 的私有坐标。它没有公开的 setter，只有 `reset()`
+     * （而 reset() 只会铺默认框，没法指定位置）。
+     */
+    _setSelectorGeometry(selector, x, y, w, h) {
+        if (![x, y, w, h].every(Number.isFinite))
+            return;
+
+        selector._startX = x;
+        selector._startY = y;
+        selector._lastX = x + w - 1;
+        selector._lastY = y + h - 1;
+
+        // 同步把手 / 遮罩的位置。光标判定只看上面四个字段，这一步是为了让
+        // actor 的位置和坐标一致，免得之后 show() 出来时停在旧地方。
+        selector._updateSelectionRect?.();
+    }
+
     /** 当前选区 [x,y,w,h]；没框、或框得比 MIN_SELECTION 还小时返回 null。 */
     _selectionRect(ui) {
         const selector = ui._areaSelector;
@@ -387,17 +462,21 @@ export default class PrtscOcrExtension extends Extension {
         // 正在等框选，再点一次 = 取消
         if (this._armed) {
             this._armed = false;
+            this._restoreNativeSelection(ui);
             this._setSelectionVisible(ui, true);
             this._setLabel(button, LABEL_IDLE);
             return;
         }
 
         // 选择模式且用户还没自己框过：进入"等你框选"状态。
-        // 同时把打开时那个默认框藏掉——不留一个占位框在那儿碍事，
-        // 用户拖的时候 drag-started 会把框放回来做实时反馈。
+        // 藏掉打开时那个默认框的**外观**，再把它的**矩形**折叠到屏幕外——
+        // 后者才是关键：只藏外观的话，那个看不见的框照样在改光标、
+        // 照样会被 _onPress 当成"移动/缩放已有选区"。折叠之后光标恒为十字，
+        // 按下必然走"开新选区"，拖动时 drag-started 再把外观放回来做实时反馈。
         if (ui._selectionButton?.checked && !ui[DRAGGED_PROP]) {
             this._armed = true;
             this._setSelectionVisible(ui, false);
+            this._collapseNativeSelection(ui);
             this._setLabel(button, LABEL_ARMED);
             return;
         }
