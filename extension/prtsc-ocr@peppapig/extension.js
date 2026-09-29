@@ -435,12 +435,22 @@ export default class PrtscOcrExtension extends Extension {
                 return;
             }
 
-            // 先给剪贴板，再做通知和关窗——用户切过去粘贴时一定已经就绪
-            St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, text);
-
             const chars = [...text].length;
             const preview = chars > 60 ? `${[...text].slice(0, 60).join('')}…` : text;
-            this._notify('提取文字', `已复制 ${chars} 个字符：${preview}`);
+
+            // 剪贴板立刻写——这是主路径，用户切过去粘贴时必须已经就绪。
+            St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, text);
+
+            // 但通知要等界面关掉之后再发：模态 grab 期间 Main.notify 根本显示不出来，
+            // 原来在 grab 里发等于白弹。原生 close() 是先 _grabHelper.ungrab()、
+            // 再在收尾时 emit('closed')（screenshot.js:1716），所以挂 'closed' 正好。
+            this._afterClose(ui, () => {
+                try {
+                    this._notify('提取文字', `已复制 ${chars} 个字符：${preview}`);
+                } catch (e) {
+                    logError(e, 'prtsc-ocr: 关闭后发通知失败');
+                }
+            });
 
             // 和原生快门按钮一致：干完活就关掉
             ui.close();
@@ -455,6 +465,47 @@ export default class PrtscOcrExtension extends Extension {
             if (this._hintId === 0)
                 this._setLabel(button, LABEL_IDLE);
         }
+    }
+
+    /**
+     * 等截图界面真正关掉（模态 grab 已释放）再执行 action。
+     *
+     * 'closed' 是原生 ScreenshotUI 的信号（signals 定义在 screenshot.js:1087，
+     * 收尾处 emit，见 1716）。万一它不来（例如界面已经被别的路径关掉了），用一条
+     * 兜底定时器保证 action 照样执行，而且只执行一次。
+     */
+    _afterClose(ui, action) {
+        let done = false;
+        let closedId = 0;
+        let fallbackId = 0;
+
+        const run = () => {
+            if (done)
+                return;
+            done = true;
+
+            if (closedId) {
+                try {
+                    ui.disconnect(closedId);
+                } catch {
+                    // 已经断开了，忽略
+                }
+                closedId = 0;
+            }
+            if (fallbackId) {
+                GLib.source_remove(fallbackId);
+                fallbackId = 0;
+            }
+
+            action();
+        };
+
+        closedId = ui.connect('closed', run);
+        fallbackId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+            fallbackId = 0;
+            run();
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _setLabel(button, text) {
