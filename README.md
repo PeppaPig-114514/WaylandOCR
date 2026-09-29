@@ -503,6 +503,7 @@ bin/ocrd restart
 | 想更准/更快 | §5 换模型（`medium` 更准、`tiny` 更快），或调 `PRTSC_OCR_BOX_THRESH` |
 | 第一次识别很慢 | 预热还没跑完（看 `ocrd status` 的 `warm`）；或手动 `bin/ocrd warm` |
 | 剪贴板粘贴不出图 | 依赖 `wl-clipboard`（`sudo apt install wl-clipboard`） |
+| **OCR 文字粘贴得出来，但 Clipboard Indicator 的历史里没有** | 它的**私密模式**开着。此时 `_refreshIndicator()` 直接 return——不记录任何东西，还把历史整段隐藏，看起来就像扩展坏了。按 `Ctrl+F8` 关掉即可。<br>注意**别用 `disable`/`enable` 去修**：它不管用。`PRIVATEMODE` 是模块级变量，GJS 缓存模块不会重新求值，只有 `Ctrl+F8` 或注销重登能解。<br>另外它的「打开菜单」是 `Ctrl+F9`，和 `Ctrl+F8` 挨着，很容易误触；而 `show-private-mode` 默认关闭时菜单里连那个开关都不显示，所以误触后完全看不出来。 |
 
 ### 7.1 为什么备用覆盖层会报 `response=2`
 
