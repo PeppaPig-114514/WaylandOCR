@@ -206,12 +206,43 @@ Linux 上做截图 OCR 的前人经验不少，都看过了：
 
 | 项目 | 形态 | 为什么没有直接用 |
 | --- | --- | --- |
-| [NormCap](https://github.com/dynobo/normcap) | Python + Qt，框选→Tesseract | 最接近需求，但引擎是 Tesseract，中文精度明显不如 PP-OCR；且每次都要冷启动一个进程 + 引擎 |
+| [Native Screenshot UI OCR Extended](https://extensions.gnome.org/extension/10254/native-screenshot-ui-ocr-extended/) | **GNOME 扩展，直接在原生截图 UI 里加按钮 → Tesseract** | **最终形态和本项目最像的一个，见 §4.1.1。差别不在 UI 而在引擎** |
+| [NormCap](https://github.com/dynobo/normcap) | Python + Qt，框选→Tesseract | 引擎是 Tesseract，中文精度明显不如 PP-OCR；且每次都要冷启动一个进程 + 引擎 |
 | [TextSnatcher](https://github.com/RajSolai/TextSnatcher) | GTK/Vala + Tesseract | 同上；项目久未维护 |
-| [gocr（GNOME 扩展）](https://github.com/EvilX/gocr) | 扩展注入框选→Tesseract | 思路正确，但依赖 shell 内部 API；GNOME 50 上兼容性没保证，且同样用 Tesseract |
+| [gocr（GNOME 扩展）](https://github.com/EvilX/gocr) | 扩展自绘框选覆盖层 → Tesseract | 画的是自己的覆盖层，没进原生 UI；引擎同样是 Tesseract |
 | Frog / gImageReader | 打开图片再识别 | 不是"截图即识别"的顺手流程 |
 
 结论：**流程照抄前人（框选 → 识别 → 剪贴板），引擎换掉**，并且把引擎做成常驻服务。
+
+#### 4.1.1 和 EGO #10254 的关系
+
+先说清楚：**"在原生截图 UI 上加一个 OCR 按钮"这件事，本项目不是第一个做的。**
+
+[oreocapybara/gnome-native-screenshot-ui-ocr-extended](https://github.com/oreocapybara/gnome-native-screenshot-ui-ocr-extended)
+（EGO [#10254](https://extensions.gnome.org/extension/10254/native-screenshot-ui-ocr-extended/)，
+2026-06 发布）早就做了，而且是**独立想到同一个办法**：GNOME 没给扩展留任何插件点，
+`org.gnome.Shell.Screenshot` 的 D-Bus 接口又被 `_senderChecker` 白名单挡着，
+所以两家都只能往 `ScreenshotUI._typeButtonContainer` 里塞第四个按钮——连
+`style_class: 'screenshot-ui-type-button'`、`x_expand: true` 这些细节都撞车了，
+因为那是在当前 Shell 里唯一能做出"看起来像原生"的写法。
+
+**所以本项目在 UI 层面没有新颖性**，这点不装。真正不一样的是按钮按下去之后：
+
+| | #10254 | 本项目 |
+| --- | --- | --- |
+| 引擎 | Tesseract | RapidOCR（PP-OCR，ONNX Runtime） |
+| 识别语言 | 调用时**不带 `-l`** → Tesseract 默认 `eng`；schema 里只有快捷键 / 面板图标 / 通知 / 按钮位置四个 key，**没有语言选项** | 中文优先，`tests/` + `bench/` 有量化结果（1419 字错 3 个） |
+| 安装 | 要 `sudo apt install tesseract-ocr`（中文还得加 `tesseract-ocr-chi-sim`，而且加了也选不上） | **全程零 sudo**，uv 装进 `~/.venv` |
+| 换引擎 | 不支持 | 首选项里可填任意 `<程序> --quiet <图>` |
+| 换行 | 单个 `\n` 合并成空格（为正文写的） | 原样保留（代码 / 终端 / 表格不会被拍平） |
+| 触发 | 点按钮 → 拖选 → **再点原生快门** | 拖选 → **松手即识别** |
+| 原生按钮 | OCR 期间禁用屏幕 / 窗口 / 录屏 / 指针 | 一个都不动 |
+| 覆盖版本 | Shell 45–50 | 仅 50 |
+| 其他 | 面板图标、可配快捷键、CI / eslint / 测试 | 无 |
+
+一句话：**UI 撞车，引擎分野**。#10254 调用 `tesseract <图> stdout` 时不带 `-l`，
+Tesseract 默认就是英文模型，**中文场景基本不可用**——这是本项目存在的理由。
+反过来，它在 GNOME 45–50 上都能装、有面板入口和 CI，这些是本项目暂时比不上的。
 
 ### 4.2 引擎：RapidOCR（PP-OCRv6，ONNX Runtime）
 
@@ -546,6 +577,14 @@ gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore \
   全角标点被折半角、代码标点间距。默认用 `small` 就是为了避开这些。
 * 首屏是**冻结帧**（先截图再框选），不是 Win11 那种实时预览——这是 portal 方案的
   固有限制，换来的是不用装 GNOME 扩展、不依赖 shell 内部 API。
+* **顶行放第四个按钮，可能触发 Shell 的布局 bug**：挂起或熄屏之后，那一行会被拉伸到
+  满屏宽。这是 [#10254 的作者实测确认](https://github.com/oreocapybara/gnome-native-screenshot-ui-ocr-extended)
+  的——`_typeButtonContainer` 是 homogeneous 容器，孩子从 3 个变成 4 个之后，
+  suspend/blank 触发的重排会把容器和所有孩子都按同一个宽度铺满。
+  **本机没有复现**（要真挂起才能触发），但既然人家为此专门改了默认布局，可信度不低。
+  真遇到了：**关掉截图界面重开一次**就恢复。#10254 的规避办法是把按钮放到下面一行
+  （图标模式，挨着「显示指针」）——如果你更在意稳定性而不是"和选区/屏幕/窗口并排"，
+  可以照做（要改的是 `extension.js` 里 `makeTypeButton` 的挂载位置）。
 
 ## 9. 目录结构
 
@@ -642,6 +681,12 @@ NormCap / TextSnatcher / gocr 等前人工作，特此致谢。
 另外 `name` 和 `description` 目前是**中英双语**（列表页给英文访客看，同时保留
 中文），但按钮上的文字是中文（`提取文字` / `请框选…`）。如果要在国际上更通用，
 下一步是接 gettext——不过当前机器上没有 `msgfmt`，需要先装 `gettext` 包。
+
+### 审核员会问"这和 #10254 有什么区别"
+
+主动答（也写进提交备注）：**UI 思路是同一个，本项目的新意在引擎**——#10254 调
+Tesseract 且不带 `-l`，默认英文模型，中文不可用；本项目自带 PP-OCR 中英模型、
+零 sudo、后端可换，且有基准测试。完整对照见 §4.1.1。
 
 ### 别人装了怎么用
 
