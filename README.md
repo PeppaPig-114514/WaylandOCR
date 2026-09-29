@@ -503,7 +503,7 @@ bin/ocrd restart
 | 想更准/更快 | §5 换模型（`medium` 更准、`tiny` 更快），或调 `PRTSC_OCR_BOX_THRESH` |
 | 第一次识别很慢 | 预热还没跑完（看 `ocrd status` 的 `warm`）；或手动 `bin/ocrd warm` |
 | 剪贴板粘贴不出图 | 依赖 `wl-clipboard`（`sudo apt install wl-clipboard`） |
-| **OCR 文字粘贴得出来，但 Clipboard Indicator 的历史里没有** | 它的**私密模式**开着。此时 `_refreshIndicator()` 直接 return——不记录任何东西，还把历史整段隐藏，看起来就像扩展坏了。按 `Ctrl+F8` 关掉即可。<br>注意**别用 `disable`/`enable` 去修**：它不管用。`PRIVATEMODE` 是模块级变量，GJS 缓存模块不会重新求值，只有 `Ctrl+F8` 或注销重登能解。<br>另外它的「打开菜单」是 `Ctrl+F9`，和 `Ctrl+F8` 挨着，很容易误触；而 `show-private-mode` 默认关闭时菜单里连那个开关都不显示，所以误触后完全看不出来。 |
+| **OCR 文字粘贴得出来，但 Clipboard Indicator 的历史里没有** | **这是它自己的缺陷，不是本项目的**——本项目只做一次标准 `St.Clipboard.set_text`。两个已知原因：<br>① **私密模式**开着（`Ctrl+F8`，会静默停止记录并把历史整段隐藏）；<br>② 它把挂剪贴板监听的 `_setupListener()` 放在 `_buildMenu().then()` 里，且**没有 `.catch()`**——那个 promise 一旦不 settle，它就再也不监听剪贴板，**一句日志都不打**。<br>**注销重登能恢复**（`disable`/`enable` 不保证，因为 GNOME 对已加载的扩展模块有缓存）。 |
 
 ### 7.1 为什么备用覆盖层会报 `response=2`
 
