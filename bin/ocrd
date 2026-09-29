@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# ocrd —— 管理常驻 OCR 服务
+#
+#   ocrd status     查看状态（含引擎信息、平均耗时）
+#   ocrd start      启动（systemd 用户服务）
+#   ocrd stop       停止
+#   ocrd restart    重启（改了参数后用）
+#   ocrd log        跟踪日志
+#   ocrd run        前台运行（调试用，Ctrl-C 退出）
+#   ocrd warm       只加载模型验证安装
+set -euo pipefail
+
+BASE_DIR="${PRTSC_OCR_HOME:-$HOME/PrtScOCR}"
+VENV_PY="$BASE_DIR/.venv/bin/python"
+UNIT="prtsc-ocr.service"
+
+has_systemd_unit() {
+  [[ -f "$HOME/.config/systemd/user/$UNIT" ]]
+}
+
+cmd_status() {
+  echo "== socket =="
+  local sock="${XDG_RUNTIME_DIR:-/tmp}/prtsc-ocr.sock"
+  echo "  $sock $([[ -S "$sock" ]] && echo '(存在)' || echo '(不存在)')"
+  echo "== 服务 =="
+  if has_systemd_unit; then
+    echo "  active:  $(systemctl --user is-active "$UNIT")"
+    echo "  enabled: $(systemctl --user is-enabled "$UNIT" 2>/dev/null || echo '?')"
+    echo "  pid:     $(systemctl --user show -p MainPID --value "$UNIT" 2>/dev/null)"
+    local mem
+    mem=$(systemctl --user show -p MemoryCurrent --value "$UNIT" 2>/dev/null || true)
+    if [[ "$mem" =~ ^[0-9]+$ ]]; then
+      echo "  内存:    $((mem / 1024 / 1024)) MiB"
+    fi
+  else
+    echo "  （未安装 systemd 单元，可能是在用 bin/ocrd run 直接跑）"
+  fi
+  echo "== 引擎 =="
+  python3 - "$BASE_DIR" <<'PY'
+import json, sys, os
+sys.path.insert(0, os.path.join(sys.argv[1], "lib"))
+try:
+    import ocr_client
+    info = ocr_client.ping(autostart=False)
+    for k in ("ready", "engine", "pid", "calls", "avg_ms", "socket"):
+        print(f"  {k}: {info.get(k)}")
+except Exception as exc:
+    print(f"  未运行 / 不可达：{exc}")
+PY
+}
+
+case "${1:-status}" in
+  status)  cmd_status ;;
+  start)   systemctl --user start "$UNIT" && sleep 0.5 && cmd_status ;;
+  stop)    systemctl --user stop "$UNIT" && echo "已停止" ;;
+  restart) systemctl --user restart "$UNIT" && sleep 0.5 && cmd_status ;;
+  enable)  systemctl --user enable --now "$UNIT" ;;
+  disable) systemctl --user disable --now "$UNIT" ;;
+  log)     journalctl --user -u "$UNIT" -f -n 50 ;;
+  warm)    exec "$VENV_PY" "$BASE_DIR/lib/ocrd.py" --warm-only ;;
+  run)     exec "$VENV_PY" "$BASE_DIR/lib/ocrd.py" --foreground --verbose ;;
+  sock)    echo "${XDG_RUNTIME_DIR:-/tmp}/prtsc-ocr.sock" ;;
+  *)       sed -n '3,10p' "$0"; exit 2 ;;
+esac

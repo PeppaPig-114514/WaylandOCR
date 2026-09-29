@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""
+ocr —— 命令行调用常驻 OCR 服务。
+
+    ocr 图片.png                      # 输出识别文字
+    ocr 图片.png --region 100,200,400,80
+    ocr 图片.png --json               # 带坐标/置信度的完整结果
+    ocr 图片.png --copy               # 顺便放进剪贴板
+    ocr 截图目录/*.png --quiet        # 批量
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import ocr_client  # noqa: E402
+
+
+def parse_region(text: str | None):
+    if not text:
+        return None
+    parts = [p.strip() for p in text.replace("x", ",").replace(" ", ",").split(",") if p.strip()]
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError("region 需要 4 个数字：x,y,w,h")
+    try:
+        return [int(float(p)) for p in parts]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"region 无法解析：{text}") from exc
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="ocr", description="对图片做本地 OCR（走常驻服务，冷启动无感）")
+    ap.add_argument("images", nargs="+", help="一张或多张图片")
+    ap.add_argument("--region", type=parse_region, default=None, help="只识别该区域：x,y,w,h")
+    ap.add_argument("--json", action="store_true", help="输出完整 JSON（含每行文本、置信度、坐标）")
+    ap.add_argument("--copy", "-c", action="store_true", help="识别结果写入剪贴板")
+    ap.add_argument("--single-line", action="store_true", help="跳过检测，整块当成一行识别")
+    ap.add_argument("--min-score", type=float, default=0.0, help="丢弃置信度低于该值的行")
+    ap.add_argument("--quiet", "-q", action="store_true", help="只输出文字，不打印耗时等提示")
+    ap.add_argument("--no-autostart", action="store_true", help="服务没起来时不自动拉起")
+    args = ap.parse_args(argv)
+
+    if args.no_autostart:
+        import os
+
+        os.environ["PRTSC_OCR_NO_AUTOSTART"] = "1"
+
+    exit_code = 0
+    collected: list[str] = []
+    for img in args.images:
+        path = Path(img).expanduser()
+        if not path.exists():
+            print(f"ocr: 文件不存在：{path}", file=sys.stderr)
+            exit_code = 1
+            continue
+        try:
+            res = ocr_client.request(
+                {
+                    "cmd": "ocr",
+                    "image": str(path.resolve()),
+                    "region": args.region,
+                    "single_line": args.single_line,
+                    "min_score": args.min_score,
+                },
+                timeout=180.0,
+                autostart=not args.no_autostart,
+            )
+        except ocr_client.DaemonNotRunning as exc:
+            print(f"ocr: {exc}", file=sys.stderr)
+            return 3
+
+        if not res.get("ok"):
+            print(f"ocr: {path.name}: {res.get('error')}", file=sys.stderr)
+            exit_code = 1
+            continue
+
+        text = res.get("text") or ""
+        collected.append(text)
+        if not text:
+            exit_code = max(exit_code, 2)
+
+        if args.json:
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        else:
+            print(text)
+            if not args.quiet and len(args.images) > 1:
+                print(f"# {path.name}: {len(res.get('lines') or [])} 行 / {res.get('ms')}ms", file=sys.stderr)
+            elif not args.quiet:
+                print(f"# {len(res.get('lines') or [])} 行 · {res.get('ms')}ms", file=sys.stderr)
+
+    if args.copy and collected:
+        joined = "\n".join(t for t in collected if t)
+        if joined:
+            try:
+                subprocess.run(
+                    ["wl-copy", "--type", "text/plain;charset=utf-8"],
+                    input=joined.encode("utf-8"), check=True, timeout=5,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                if not args.quiet:
+                    print("# 已复制到剪贴板", file=sys.stderr)
+            except (OSError, subprocess.SubprocessError) as exc:
+                print(f"ocr: 写剪贴板失败：{exc}", file=sys.stderr)
+                exit_code = max(exit_code, 1)
+
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

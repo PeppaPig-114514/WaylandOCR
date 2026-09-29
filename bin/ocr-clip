@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""
+ocr-clip —— 识别剪贴板里的图片，并把文字放回剪贴板。
+
+用途：任何来源的图片都能用。比如用 GNOME 自带截图（Shift+PrtSc）抓了图，
+或者从浏览器复制了一张图，敲一下这个命令（默认快捷键 Super+Shift+Y），
+图片就被换成识别出来的文字，直接 Ctrl+V 粘贴。
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import ocr_client  # noqa: E402
+
+
+def clipboard_types() -> list[str]:
+    try:
+        out = subprocess.run(
+            ["wl-paste", "--list-types"], capture_output=True, text=True, timeout=5, check=False
+        )
+        return [t.strip() for t in out.stdout.splitlines() if t.strip()]
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
+def read_clipboard_image() -> bytes | None:
+    types = clipboard_types()
+    candidates = [t for t in types if t.startswith("image/")]
+    if not candidates:
+        return None
+    # 优先 png，其次其它格式（rapidocr 靠 PIL，能读 jpeg/webp 等）
+    order = sorted(candidates, key=lambda t: 0 if "png" in t else 1)
+    for mime in order:
+        try:
+            out = subprocess.run(
+                ["wl-paste", "--type", mime], capture_output=True, timeout=15, check=False
+            )
+            if out.returncode == 0 and out.stdout:
+                return out.stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return None
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="ocr-clip", description="识别剪贴板图片 -> 文字回剪贴板")
+    ap.add_argument("--dry-run", action="store_true", help="只打印，不改剪贴板")
+    args = ap.parse_args(argv)
+
+    data = read_clipboard_image()
+    if data is None:
+        msg = "剪贴板里没有图片（先用 Shift+PrtSc 或任意方式复制一张图）"
+        print(f"ocr-clip: {msg}", file=sys.stderr)
+        subprocess.Popen(
+            ["notify-send", "-a", "截图 OCR", "-i", "dialog-warning", "剪贴板里没有图片", msg],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return 2
+
+    try:
+        res = ocr_client.ocr_bytes(data)
+    except ocr_client.DaemonNotRunning as exc:
+        print(f"ocr-clip: {exc}", file=sys.stderr)
+        return 3
+
+    if not res.get("ok"):
+        print(f"ocr-clip: {res.get('error')}", file=sys.stderr)
+        return 1
+
+    text = (res.get("text") or "").strip()
+    if not text:
+        print("ocr-clip: 没有识别到文字", file=sys.stderr)
+        subprocess.Popen(
+            ["notify-send", "-a", "截图 OCR", "-i", "dialog-warning", "没有识别到文字", "剪贴板里的图片没找到可识别文本"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return 2
+
+    print(text)
+    if args.dry_run:
+        return 0
+
+    try:
+        subprocess.run(
+            ["wl-copy", "--type", "text/plain;charset=utf-8"],
+            input=text.encode("utf-8"), check=True, timeout=5,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"ocr-clip: 写剪贴板失败：{exc}", file=sys.stderr)
+        return 1
+
+    preview = text if len(text) <= 120 else text[:117] + "…"
+    subprocess.Popen(
+        ["notify-send", "-a", "截图 OCR", "-i", "insert-text",
+         f"文字已复制（{len(text)} 字 / {(res.get('ms') or 0):.0f}ms）", preview],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

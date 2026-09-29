@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# prtsc-ocr —— 唤起截图 OCR 工具（PrtSc 默认绑这个）
+#
+# 需要系统 python3 + python3-gi + GTK4（Ubuntu 桌面自带），
+# OCR 本身跑在 ~/PrtScOCR/.venv 的常驻守护进程里。
+set -euo pipefail
+
+BASE_DIR="${PRTSC_OCR_HOME:-$HOME/PrtScOCR}"
+PY="${PRTSC_OCR_GUI_PYTHON:-/usr/bin/python3}"
+
+if [[ ! -x "$PY" ]]; then
+  PY="$(command -v python3)"
+fi
+
+# GNOME 快捷键唤起的进程环境里通常已经带好了 WAYLAND_DISPLAY，
+# 但从别的上下文（比如 ssh）调用时显式补一下更稳。
+export GDK_BACKEND="${GDK_BACKEND:-wayland}"
+
+# ---- 为什么要在"中性 scope"里把自己重跑一遍 --------------------------------
+#
+# Ubuntu 的 portal 在同意截图前要看调用者的 app-id 有没有被授权过；没有就弹一个
+# "允许截图吗"的系统对话框。而这个对话框**只能由前台应用弹出**——gnome-shell 的
+# com.canonical.Shell.PermissionPrompting 会直接拒绝后台请求：
+#
+#   Failed to show access dialog: AccessDenied:
+#     Only the focused app is allowed to show a system access dialog
+#
+# 我们是"先抓屏、后建窗"，请求发出的那一刻还没有窗口，自然不是前台 → 对话框弹不出来
+# → portal 拒绝 → 截图接口返回 response=2。
+#
+# 关键在 app-id 怎么来的：portal 从调用者的 cgroup 推。只有 app-*.service、
+# dbus-*.service 这类命名才会被认成"某个具体应用"。快捷键由 gsd-media-keys 拉起，
+# 进程落在 app scope 里，于是变成一个"没被授权的新应用"。
+# 而权限库里被授权的是**空 app-id（host，即未识别的调用者）**——系统自带的
+# gnome-screenshot 走的也是这条路。
+#
+# 所以换个中性命名的 transient scope 重跑，app-id 回到空值、命中已有授权，静默抓屏。
+# 不改系统权限库，也不需要用户点任何"允许"。
+# 用 PRTSC_OCR_SCOPED 做哨兵，避免自我递归；PRTSC_OCR_NO_SCOPE=1 可强制关掉这层包装。
+if [[ -z "${PRTSC_OCR_SCOPED:-}" && -z "${PRTSC_OCR_NO_SCOPE:-}" ]] \
+   && command -v systemd-run >/dev/null 2>&1 \
+   && systemctl --user is-active default.target >/dev/null 2>&1; then
+  export PRTSC_OCR_SCOPED=1
+  # 用绝对路径重跑：快捷键是绝对路径调用的，但从别处相对调用时 $0 也要能解析。
+  SELF="$(readlink -f "$0")"
+  # 这里用 exec：万一 scope 起不来，systemd-run 会自己报错退出，
+  # 绝不会出现"回退重跑导致两个窗口"的情况。
+  exec systemd-run --user --scope --quiet -- "$SELF" "$@"
+fi
+
+exec "$PY" "$BASE_DIR/lib/snipper.py" "$@"

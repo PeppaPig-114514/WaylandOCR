@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=截图 OCR
+Name[en]=Screenshot OCR
+GenericName=截图取字
+Comment=框选屏幕区域，把其中的文字提取到剪贴板
+Exec=@BASE_DIR@/bin/prtsc-ocr
+Icon=insert-text
+Terminal=false
+Categories=Utility;
+Keywords=OCR;截图;文字识别;screenshot;text;
+StartupNotify=false
+StartupWMClass=org.prtscocr.Snipper

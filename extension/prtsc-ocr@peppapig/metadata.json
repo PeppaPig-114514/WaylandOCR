@@ -1,0 +1,11 @@
+{
+  "uuid": "prtsc-ocr@peppapig",
+  "name": "Screenshot OCR",
+  "description": "Adds an \"Extract text\" button to GNOME's built-in screenshot tool: drag a selection (or use the current one), click the button, and the text in that area goes straight to your clipboard. Recognition happens entirely on your machine - nothing is uploaded.\n\nEvery native feature is left untouched: area, window and full-screen capture, screen recording, the pointer toggle, saving to the Screenshots folder, and the Print / Shift+Print / Alt+Print shortcuts all behave exactly as before. This extension only adds a fourth button next to Area / Screen / Window.\n\nText recognition is delegated to a local OCR program. The companion project ships one (RapidOCR + ONNX Runtime, fully offline): https://github.com/PeppaPig-114514/WaylandOCR\nIf your backend lives somewhere else, set its path in this extension's preferences.\n\n---\n\n给 GNOME 自带的截图工具加一个「提取文字」按钮：框选一块区域、点一下，里面的文字就进剪贴板，全程在本机识别，不联网。\n\n原生功能一个都不动：区域 / 窗口 / 整屏、录屏、显示指针、保存到图片文件夹，以及 Print / Shift+Print / Alt+Print 键位全部照旧——只是工具栏上多了第四个按钮。\n\n识别交给本机的 OCR 程序完成。配套项目自带一个（RapidOCR + ONNX Runtime，全离线）：https://github.com/PeppaPig-114514/WaylandOCR\n后端装在别处的话，可以在扩展的首选项里改路径。",
+  "shell-version": [
+    "50"
+  ],
+  "url": "https://github.com/PeppaPig-114514/WaylandOCR",
+  "settings-schema": "org.gnome.shell.extensions.prtsc-ocr",
+  "version-name": "1.0.0"
+}

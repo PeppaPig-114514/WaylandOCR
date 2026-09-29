@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: GPL-3.0-or-later
+
+  「提取文字」按钮把框选的画面交给外部 OCR 程序识别。默认路径是
+  ~/PrtScOCR/bin/ocr（本项目的后端），但别人从 extensions.gnome.org
+  装了扩展之后不一定把后端放在同一个位置，所以这里留成可配置。
+
+  留空 = 用默认路径。
+-->
+<schemalist gettext-domain="prtsc-ocr">
+
+  <schema id="org.gnome.shell.extensions.prtsc-ocr"
+          path="/org/gnome/shell/extensions/prtsc-ocr/">
+
+    <key name="ocr-command" type="s">
+      <default>''</default>
+      <summary>OCR command</summary>
+      <description>
+        Path to the executable used to recognise text in the selected area.
+
+        The program is invoked as `&lt;command&gt; --quiet &lt;image.png&gt;` and must print
+        the recognised text to standard output. Exit code 0 means success, 2 means
+        "the image was fine but contained no text", and anything else is treated as
+        a failure (the last line of stderr is shown to the user).
+
+        When empty, the extension looks for the companion project's client in a few
+        known locations (~/PrtScOCR/bin/ocr and ~/WaylandOCR/bin/ocr) and uses the
+        first one that exists and is executable.
+      </description>
+    </key>
+
+  </schema>
+
+</schemalist>

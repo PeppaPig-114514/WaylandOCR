@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+#
+# 安装 / 更新 / 卸载「提取文字」按钮扩展。
+#
+#   install-extension            安装并尝试启用
+#   install-extension --remove   卸载
+#   install-extension status     查看状态
+#
+# 用软链接装到 ~/.local/share/gnome-shell/extensions/，所以改了 extension/ 里的
+# 源码只需禁用再启用扩展（或重登）即可生效，不用重跑本脚本。
+#
+set -euo pipefail
+
+BASE_DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+UUID="prtsc-ocr@peppapig"
+SRC="$BASE_DIR/extension/$UUID"
+DEST_DIR="$HOME/.local/share/gnome-shell/extensions"
+DEST="$DEST_DIR/$UUID"
+
+die() { echo "错误：$*" >&2; exit 1; }
+ok()  { echo "  ✓ $*"; }
+
+check_sources() {
+    [[ -f "$SRC/metadata.json" ]] || die "缺少 $SRC/metadata.json"
+    [[ -f "$SRC/extension.js" ]]  || die "缺少 $SRC/extension.js"
+
+    python3 -c "import json,sys; json.load(open('$SRC/metadata.json'))" \
+        || die "metadata.json 不是合法 JSON"
+
+    # gjs 解析整份模块后才解析 import；这里报"找不到 resource://..."就说明语法没问题
+    local out
+    out="$(gjs -m "$SRC/extension.js" 2>&1 || true)"
+    if grep -qi "syntaxerror\|Syntax error" <<<"$out"; then
+        echo "$out" >&2
+        die "extension.js 有语法错误"
+    fi
+}
+
+cmd_status() {
+    echo "扩展：$UUID"
+    if [[ -L "$DEST" ]]; then
+        echo "  安装方式：软链接 → $(readlink "$DEST")"
+    elif [[ -d "$DEST" ]]; then
+        echo "  安装方式：实体目录"
+    else
+        echo "  未安装"
+        return 0
+    fi
+    echo -n "  是否启用："
+    local st
+    st="$(LC_ALL=C gnome-extensions info "$UUID" 2>/dev/null | awk -F': *' '/State/{print $2}')"
+    echo "${st:-未知}"
+    echo "  原始截图键（应保持 Print）："
+    echo -n "    show-screenshot-ui = "
+    gsettings get org.gnome.shell.keybindings show-screenshot-ui
+    if [[ -f "$SRC/schemas/gschemas.compiled" ]]; then
+        echo "  首选项 schema：已编译"
+    else
+        echo "  首选项 schema：未编译（重跑 install 会自动编译）"
+    fi
+}
+
+cmd_remove() {
+    if [[ -e "$DEST" || -L "$DEST" ]]; then
+        gnome-extensions disable "$UUID" 2>/dev/null || true
+        rm -rf "$DEST"
+        ok "已卸载 $DEST"
+    else
+        echo "  未安装，无需卸载"
+    fi
+}
+
+cmd_install() {
+    command -v gnome-extensions >/dev/null || die "找不到 gnome-extensions"
+    check_sources
+
+    # 首选项（prefs.js）要读 GSettings schema，这里得先把 schemas/ 编译出来。
+    # 走 gnome-extensions install 装 zip 的话它会自动编译；但我们用的是软链接，
+    # 装的就是源码目录本身，所以得自己编——否则 getSettings() 会失败。
+    if [[ -d "$SRC/schemas" ]]; then
+        command -v glib-compile-schemas >/dev/null \
+            || die "找不到 glib-compile-schemas（装 libglib2.0-bin）"
+        glib-compile-schemas "$SRC/schemas" || die "schema 编译失败"
+        ok "schema 已编译：$SRC/schemas/gschemas.compiled"
+    fi
+
+    mkdir -p "$DEST_DIR"
+    rm -rf "$DEST"
+    ln -s "$SRC" "$DEST"
+    ok "已安装：$DEST → $SRC"
+
+    if gnome-extensions enable "$UUID" 2>/dev/null; then
+        ok "已启用"
+    else
+        echo "  ! 自动启用没成功（GNOME 对新装的扩展需要重登一次才会扫描到）"
+        echo "    重登后执行：gnome-extensions enable $UUID"
+    fi
+
+    # 实测：新装的扩展要重登才会被 shell 加载
+    local state
+    state="$(LC_ALL=C gnome-extensions info "$UUID" 2>/dev/null | awk -F': *' '/State/{print $2}')"
+    [[ -z "$state" ]] && state="（shell 还没认识它，重登后再看）"
+    echo
+    echo "  当前状态：${state:-未知}"
+    echo
+    echo "下一步：按键盘上的 Print 打开 GNOME 原生截图工具，"
+    echo "        工具栏上应该多出第四个按钮「提取文字」。"
+}
+
+case "${1:-install}" in
+    install|"") cmd_install ;;
+    --remove|remove) cmd_remove ;;
+    status) cmd_status ;;
+    *) die "未知参数：$1（可用：install / --remove / status）" ;;
+esac

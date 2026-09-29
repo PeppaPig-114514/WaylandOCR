@@ -1,0 +1,16 @@
+# 运行期产物
+.venv/
+logs/
+tmp/
+state/
+__pycache__/
+*.pyc
+
+# 基准测试的中间产物（脚本本身要保留）
+bench/samples/
+bench/__pycache__/
+bench/*.log
+
+# GSettings schema 的编译产物（安装/打包时生成）
+gschemas.compiled
+dist/

@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+#
+# 把扩展打包成能直接提交到 extensions.gnome.org 的 zip。
+#
+#   ./bin/build-extension              打包到 dist/
+#   ./bin/build-extension --check      只做校验，不打包
+#
+# extensions.gnome.org 的提交要求（这个脚本逐条检查）：
+#   · zip 根目录下就是 metadata.json / extension.js（不能多套一层目录）
+#   · metadata.json 必须有 uuid / name / description / shell-version
+#   · shell-version 只能写已经发布的版本，不能写 "50" 之外的未来版本
+#   · 许可证：扩展目录里有 LICENSE 文件
+#   · 有 GSettings schema 的话用 gnome-extensions pack --schema 带上
+#
+set -euo pipefail
+
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC="$BASE_DIR/extension/prtsc-ocr@peppapig"
+UUID="prtsc-ocr@peppapig"
+OUT_DIR="$BASE_DIR/dist"
+SCHEMA_REL="schemas/org.gnome.shell.extensions.prtsc-ocr.gschema.xml"
+
+CHECK_ONLY=0
+[[ "${1:-}" == "--check" ]] && CHECK_ONLY=1
+
+c_info=$'\033[36m'; c_ok=$'\033[32m'; c_warn=$'\033[33m'; c_err=$'\033[31m'; c_off=$'\033[0m'
+step() { printf '\n%s==> %s%s\n' "$c_info" "$*" "$c_off"; }
+ok()   { printf '    %s✓%s %s\n' "$c_ok" "$c_off" "$*"; }
+warn() { printf '    %s!%s %s\n' "$c_warn" "$c_off" "$*"; }
+die()  { printf '    %s✗%s %s\n' "$c_err" "$c_off" "$*" >&2; exit 1; }
+
+[[ -d "$SRC" ]] || die "找不到扩展目录：$SRC"
+
+# ---------------------------------------------------------------------------
+step "1/5 检查必需文件"
+for f in metadata.json extension.js LICENSE; do
+  [[ -f "$SRC/$f" ]] || die "缺少 $f"
+  ok "$f"
+done
+[[ -f "$SRC/$SCHEMA_REL" ]] && ok "$SCHEMA_REL" || die "缺少 $SCHEMA_REL"
+
+# ---------------------------------------------------------------------------
+step "2/5 校验 metadata.json"
+python3 - "$SRC/metadata.json" "$UUID" <<'PY' || exit 1
+import json, re, sys
+
+path, want_uuid = sys.argv[1], sys.argv[2]
+try:
+    meta = json.load(open(path, encoding="utf-8"))
+except Exception as exc:
+    sys.exit(f"    metadata.json 不是合法 JSON：{exc}")
+
+problems, notes = [], []
+
+if meta.get("uuid") != want_uuid:
+    problems.append(f"uuid 应为 {want_uuid}，实际 {meta.get('uuid')!r}")
+if not meta.get("name"):
+    problems.append("缺少 name")
+desc = meta.get("description") or ""
+if len(desc) < 40:
+    problems.append("description 太短（extensions.gnome.org 的列表页要显示它）")
+if not meta.get("shell-version"):
+    problems.append("缺少 shell-version")
+
+# shell-version 只允许已发布的版本号；写未来版本会被审核打回
+for v in meta.get("shell-version") or []:
+    if not re.fullmatch(r"\d+", str(v)):
+        problems.append(f"shell-version 里的 {v!r} 不是纯数字版本号")
+
+url = meta.get("url") or ""
+if "REPLACE-ME" in url:
+    problems.append(f"url 还是占位符：{url}")
+elif not url:
+    notes.append("没有 url（extensions.gnome.org 的列表页建议给一个主页/仓库地址）")
+
+if "version" in meta:
+    notes.append("metadata 里有 version 字段；上传后由 extensions.gnome.org 自己管理，"
+                 "通常不用手写（要写必须是整数）")
+
+for p in problems:
+    print(f"    \033[31m✗\033[0m {p}")
+for n in notes:
+    print(f"    \033[33m!\033[0m {n}")
+if problems:
+    sys.exit(1)
+print(f"    \033[32m✓\033[0m uuid / name / description / shell-version={meta['shell-version']} / url 都齐了")
+PY
+
+# ---------------------------------------------------------------------------
+step "3/5 校验 GSettings schema"
+if command -v glib-compile-schemas >/dev/null; then
+  # --strict 会把 summary/description 缺失、key 名笔误之类当错误
+  ( cd "$SRC" && glib-compile-schemas --strict --dry-run schemas/ ) \
+    || die "schema 没通过 --strict 校验"
+  ok "schema 通过 --strict 校验"
+else
+  warn "没有 glib-compile-schemas，跳过 schema 校验"
+fi
+
+# ---------------------------------------------------------------------------
+if [[ "$CHECK_ONLY" == "1" ]]; then
+  step "只校验（--check），不打包"
+  printf '\n    可以打包：./bin/build-extension\n\n'
+  exit 0
+fi
+
+step "4/5 用 gnome-extensions pack 打包"
+if ! command -v gnome-extensions >/dev/null; then
+  die "没有 gnome-extensions 命令（装 gnome-shell 包）"
+fi
+mkdir -p "$OUT_DIR"
+rm -f "$OUT_DIR/$UUID.shell-extension.zip"
+# --schema 让打包器把 gschema.xml 收进 zip；装在用户机器上时由
+# gnome-extensions install / 扩展商店客户端自动跑 glib-compile-schemas
+# 生成 gschemas.compiled，所以 zip 里不需要（也不该）带编译产物。
+# --extra-source 收那些打包器默认不认识的文件。
+gnome-extensions pack "$SRC" \
+  --schema="$SCHEMA_REL" \
+  --extra-source=LICENSE \
+  -o "$OUT_DIR" --force >/dev/null
+ZIP="$OUT_DIR/$UUID.shell-extension.zip"
+[[ -f "$ZIP" ]] || die "打包没产出 zip"
+ok "$(basename "$ZIP")  ($(stat -c %s "$ZIP") 字节)"
+
+# ---------------------------------------------------------------------------
+step "5/5 校验 zip 内容"
+mapfile -t entries < <(unzip -Z1 "$ZIP")
+
+fail=0
+has() { for e in "${entries[@]}"; do [[ "$e" == "$1" ]] && return 0; done; return 1; }
+
+# 根目录必须是文件本身，不能套一层 uuid/ 目录
+for want in metadata.json extension.js prefs.js LICENSE "$SCHEMA_REL"; do
+  if has "$want"; then ok "$want"; else warn "zip 里缺少 $want"; fail=1; fi
+done
+
+if printf '%s\n' "${entries[@]}" | grep -q "^$UUID/"; then
+  warn "zip 里多套了一层 $UUID/ 目录——extensions.gnome.org 要求文件在根目录"
+  fail=1
+fi
+if printf '%s\n' "${entries[@]}" | grep -q "gschemas.compiled"; then
+  warn "zip 里带了 gschemas.compiled（编译产物，安装时会重新生成）"
+fi
+
+# 解出来真跑一遍 import，确保不是坏文件
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+unzip -q "$ZIP" -d "$TMP"
+if command -v gjs >/dev/null; then
+  out=$(cd "$TMP" && gjs -m -c 'import("./extension.js").catch(e => { print(e.message); });' 2>&1 || true)
+  if grep -qi "syntaxerror" <<<"$out"; then
+    warn "extension.js 有语法错误："; printf '%s\n' "$out" | head -5
+    fail=1
+  else
+    ok "extension.js 语法正常"
+  fi
+  out=$(cd "$TMP" && gjs -m -c 'import("./prefs.js").catch(e => { print(e.message); });' 2>&1 || true)
+  if grep -qi "syntaxerror" <<<"$out"; then
+    warn "prefs.js 有语法错误："; printf '%s\n' "$out" | head -5
+    fail=1
+  else
+    ok "prefs.js 语法正常"
+  fi
+fi
+
+[[ "$fail" == "0" ]] || die "zip 内容不合格"
+
+# ---------------------------------------------------------------------------
+cat <<EOF
+
+${c_ok}打包完成。${c_off}
+
+  $ZIP
+
+提交到 extensions.gnome.org：
+  1. 打开 https://extensions.gnome.org/upload/
+  2. 用 GNOME 账号登录（没有就先注册）
+  3. 上传上面这个 zip —— 站点会自己读 metadata.json
+  4. 上传后进入审核队列，通常几天到几周；通过前只有你自己能装
+
+提交前值得再确认一遍：
+  · metadata.json 的 url 别留着 REPLACE-ME
+  · shell-version 只写你真机验证过的版本（当前：$(python3 -c "import json;print(json.load(open('$SRC/metadata.json'))['shell-version'])" )）
+  · 审核员会看是否使用私有 API —— 本扩展确实改了 gnome-shell 的截图 UI 内部结构，
+    这点在 README 的「已知限制」里写清楚了，最好在提交备注里也说明
+
+EOF

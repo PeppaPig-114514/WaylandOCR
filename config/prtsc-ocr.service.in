@@ -1,0 +1,21 @@
+[Unit]
+Description=prtsc-ocr 常驻 OCR 服务（本地 RapidOCR / ONNX，无网络依赖）
+Documentation=file://@BASE_DIR@/README.md
+After=default.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+Environment=PRTSC_OCR_HOME=@BASE_DIR@
+ExecStart=@BASE_DIR@/.venv/bin/python @BASE_DIR@/lib/ocrd.py --foreground
+Restart=always
+RestartSec=2
+
+# 常驻但不能影响桌面手感：降优先级，空闲时几乎不占资源
+Nice=5
+IOSchedulingClass=idle
+OOMPolicy=stop
+
+[Install]
+WantedBy=default.target
