@@ -14,3 +14,6 @@ bench/*.log
 # GSettings schema 的编译产物（安装/打包时生成）
 gschemas.compiled
 dist/
+
+# 从 po/ 编译出来的翻译（bin/compile-locales 生成，和 gschemas.compiled 同理）
+locale/

@@ -1,3 +1,5 @@
+**中文** | [English](README.en.md)
+
 # PrtScOCR —— 给 Ubuntu 的截图工具装上 OCR 按钮
 
 > macOS 有 Live Text，Win11 截图工具（Snipping Tool）有"文本操作"。
@@ -127,7 +129,7 @@ cd ~/PrtScOCR
 
 ```bash
 gnome-extensions info prtsc-ocr@peppapig      # 状态应为 ACTIVE
-journalctl --user -b | grep '\[prtsc-ocr\]'   # 应有两行：按钮已加入 / 已启用
+journalctl --user -b | grep '\[prtsc-ocr\]'   # 应有两行：button added… / enabled（日志是英文，方便贴 issue）
 ```
 
 回滚：
@@ -155,8 +157,13 @@ gsettings reset org.gnome.shell.extensions.prtsc-ocr ocr-command   # 恢复默�
 
 被调用的程序要接受 `--quiet <图片路径>`，把文字打到标准输出；退出码 `0` 成功、
 `2` 表示图里没字、其它算失败（stderr 最后一行会显示在按钮上）。
-`bin/install-extension` 会顺手把 `schemas/` 编译好——软链接安装不像
-`gnome-extensions install` 那样自动编译，少了这步首选项读不到。
+`bin/install-extension` 会把 `schemas/` 和 `locale/` 一起编译好——软链接安装不像
+`gnome-extensions install` 那样自动编译，少了这步首选项读不到、翻译也不生效。
+
+**界面语言**：扩展的字符串是 gettext 消息（英文原文写在代码里当 msgid），中文译文在
+`po/zh_CN.po`，跟着系统语言走——中文系统显示「提取文字」，其它语言显示 `Extract text`。
+要加一种语言：加一个 `po/<lang>.po`，再跑 `./bin/compile-locales`。**本机没装 gettext
+（连 `msgfmt` 都没有），所以那个脚本自带纯 Python 的 .mo 生成器**，不需要额外装东西。
 
 **想把它提交到 extensions.gnome.org：**
 
@@ -598,10 +605,14 @@ PrtScOCR/
 │       ├── extension.js           全部逻辑：加按钮、框选、取像素、调 OCR
 │       ├── prefs.js               首选项界面（改 OCR 后端路径）
 │       ├── LICENSE                GPL-3.0-or-later
-│       └── schemas/               GSettings schema（gschemas.compiled 是编译产物）
+│       ├── schemas/               GSettings schema（gschemas.compiled 是编译产物）
+│       └── locale/<语言>/LC_MESSAGES/*.mo   编译好的翻译（同样是产物，不进 git）
+├── po/
+│   └── zh_CN.po                   中文译文（代码里的英文字符串是 msgid）
 ├── bin/
 │   ├── install-extension          安装/卸载那个扩展
 │   ├── build-extension            打包成可上架 extensions.gnome.org 的 zip
+│   ├── compile-locales            .po → .mo（没有 msgfmt 也能用）
 │   ├── prtsc-ocr                  唤起备用覆盖层（Super+Shift+S 绑的就是它）
 │   ├── ocr                       命令行识别
 │   ├── ocr-clip                  识别剪贴板图片
@@ -679,9 +690,10 @@ NormCap / TextSnatcher / gocr 等前人工作，特此致谢。
   测试守着，见 `tests/`）；
 - 识别完全在本机，扩展本身不联网。
 
-另外 `name` 和 `description` 目前是**中英双语**（列表页给英文访客看，同时保留
-中文），但按钮上的文字是中文（`提取文字` / `请框选…`）。如果要在国际上更通用，
-下一步是接 gettext——不过当前机器上没有 `msgfmt`，需要先装 `gettext` 包。
+另外**界面已经接了 gettext**：代码里的英文是 msgid，中文译文在 `po/zh_CN.po`，
+编译进 `locale/`，跟系统语言走。所以英文系统看到 `Extract text`，中文系统看到的还是
+`提取文字`。`metadata.json` 的 `name` / `description` 仍是中英双语**内联**——扩展商店
+不保证会翻译元信息，内联最稳。
 
 ### 审核员会问"这和 #10254 有什么区别"
 

@@ -32,7 +32,7 @@ die()  { printf '    %s✗%s %s\n' "$c_err" "$c_off" "$*" >&2; exit 1; }
 [[ -d "$SRC" ]] || die "找不到扩展目录：$SRC"
 
 # ---------------------------------------------------------------------------
-step "1/5 检查必需文件"
+step "1/6 检查必需文件"
 for f in metadata.json extension.js LICENSE; do
   [[ -f "$SRC/$f" ]] || die "缺少 $f"
   ok "$f"
@@ -40,7 +40,7 @@ done
 [[ -f "$SRC/$SCHEMA_REL" ]] && ok "$SCHEMA_REL" || die "缺少 $SCHEMA_REL"
 
 # ---------------------------------------------------------------------------
-step "2/5 校验 metadata.json"
+step "2/6 校验 metadata.json"
 python3 - "$SRC/metadata.json" "$UUID" <<'PY' || exit 1
 import json, re, sys
 
@@ -87,7 +87,7 @@ print(f"    \033[32m✓\033[0m uuid / name / description / shell-version={meta['
 PY
 
 # ---------------------------------------------------------------------------
-step "3/5 校验 GSettings schema"
+step "3/6 校验 GSettings schema"
 if command -v glib-compile-schemas >/dev/null; then
   # --strict 会把 summary/description 缺失、key 名笔误之类当错误
   ( cd "$SRC" && glib-compile-schemas --strict --dry-run schemas/ ) \
@@ -104,7 +104,15 @@ if [[ "$CHECK_ONLY" == "1" ]]; then
   exit 0
 fi
 
-step "4/5 用 gnome-extensions pack 打包"
+# ---------------------------------------------------------------------------
+step "4/6 编译翻译（.po → .mo）"
+if [[ -x "$BASE_DIR/bin/compile-locales" ]]; then
+  "$BASE_DIR/bin/compile-locales" || die "翻译编译失败"
+else
+  warn "找不到 bin/compile-locales，跳过（扩展将只有英文）"
+fi
+
+step "5/6 用 gnome-extensions pack 打包"
 if ! command -v gnome-extensions >/dev/null; then
   die "没有 gnome-extensions 命令（装 gnome-shell 包）"
 fi
@@ -117,13 +125,14 @@ rm -f "$OUT_DIR/$UUID.shell-extension.zip"
 gnome-extensions pack "$SRC" \
   --schema="$SCHEMA_REL" \
   --extra-source=LICENSE \
+  --extra-source=locale \
   -o "$OUT_DIR" --force >/dev/null
 ZIP="$OUT_DIR/$UUID.shell-extension.zip"
 [[ -f "$ZIP" ]] || die "打包没产出 zip"
 ok "$(basename "$ZIP")  ($(stat -c %s "$ZIP") 字节)"
 
 # ---------------------------------------------------------------------------
-step "5/5 校验 zip 内容"
+step "6/6 校验 zip 内容"
 mapfile -t entries < <(unzip -Z1 "$ZIP")
 
 fail=0
@@ -142,25 +151,43 @@ if printf '%s\n' "${entries[@]}" | grep -q "gschemas.compiled"; then
   warn "zip 里带了 gschemas.compiled（编译产物，安装时会重新生成）"
 fi
 
+# 翻译必须真的进包，否则非英语用户直接看到英文
+mo_count=$(printf '%s\n' "${entries[@]}" | grep -c '^locale/.*\.mo$' || true)
+if [[ "$mo_count" -gt 0 ]]; then
+  ok "翻译文件 $mo_count 个"
+else
+  warn "zip 里没有 locale/**/*.mo —— 非英语界面会退化成英文"
+  fail=1
+fi
+if printf '%s\n' "${entries[@]}" | grep -q "\.po$"; then
+  warn "zip 里带了 .po 源文件（不该进包，编译产物 .mo 才是要带的）"
+fi
+
+
 # 解出来真跑一遍 import，确保不是坏文件
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 unzip -q "$ZIP" -d "$TMP"
 if command -v gjs >/dev/null; then
-  out=$(cd "$TMP" && gjs -m -c 'import("./extension.js").catch(e => { print(e.message); });' 2>&1 || true)
-  if grep -qi "syntaxerror" <<<"$out"; then
-    warn "extension.js 有语法错误："; printf '%s\n' "$out" | head -5
-    fail=1
-  else
-    ok "extension.js 语法正常"
-  fi
-  out=$(cd "$TMP" && gjs -m -c 'import("./prefs.js").catch(e => { print(e.message); });' 2>&1 || true)
-  if grep -qi "syntaxerror" <<<"$out"; then
-    warn "prefs.js 有语法错误："; printf '%s\n' "$out" | head -5
-    fail=1
-  else
-    ok "prefs.js 语法正常"
-  fi
+  # 注意：必须把脚本写成**文件**再 `gjs -m <文件>`。`gjs -m -c '...'` 是不行的
+  # ——它会把 "<command line>" 当模块文件去解析，然后报一条**不含** SyntaxError
+  # 字样的错，于是 grep 永远匹配不到，检查形同虚设（这里踩过）。
+  check_js() {
+    local rel="$1"
+    local file="$TMP/$rel"
+    [[ -f "$file" ]] || return 0
+    local out
+    out=$(gjs -m "$file" 2>&1 || true)
+    if grep -qi "syntaxerror" <<<"$out"; then
+      warn "$rel 有语法错误："
+      printf '%s\n' "$out" | head -5
+      fail=1
+    else
+      ok "$rel 语法正常"
+    fi
+  }
+  check_js extension.js
+  check_js prefs.js
 fi
 
 [[ "$fail" == "0" ]] || die "zip 内容不合格"

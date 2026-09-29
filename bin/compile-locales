@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""把 po/*.po 编译成 locale/<lang>/LC_MESSAGES/<domain>.mo
+
+为什么需要这个脚本：本项目开发机（Ubuntu 26.04）上**没有装 gettext**，
+`msgfmt` 不存在，而 GNOME 扩展要读到翻译必须有编译好的 `.mo`。
+所以这里自带一个纯 Python 的 `.mo` 生成器——`gettext` 的 .mo 格式很简单
+（几张小端序偏移表 + 字符串池），不需要任何第三方库。
+
+装了 gettext 的机器上会优先用 `msgfmt`（它更权威，会做各种语法检查），
+只有找不到 `msgfmt` 时才走内置实现。
+
+用法：
+    ./bin/compile-locales              # 编译 po/ 下所有 .po
+    ./bin/compile-locales --check      # 只检查，不写文件
+    ./bin/compile-locales --verify     # 编译后逐语言验证 .mo 真的能被读到
+
+退出码：0 成功，1 有错。
+"""
+from __future__ import annotations
+
+import argparse
+import array
+import json
+import os
+import re
+import shutil
+import struct
+import subprocess
+import tempfile
+import sys
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+EXT_DIR = BASE_DIR / "extension" / "prtsc-ocr@peppapig"
+# .po 故意放在**扩展目录之外**：gnome-extensions pack 一旦发现扩展目录里有
+# po/ ，就会自己去调 msgfmt，而这台机器上没有 msgfmt，pack 会直接失败。
+PO_DIR = BASE_DIR / "po"
+LOCALE_DIR = EXT_DIR / "locale"
+
+# .mo 文件里的魔数，字节序标记
+MO_MAGIC = 0x950412DE
+
+# 必须出现在头部里的字段：GLib 靠它知道编码，缺了会直接不认这个文件
+REQUIRED_HEADER = {
+    "MIME-Version": "1.0",
+    "Content-Type": "text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding": "8bit",
+}
+
+
+# --------------------------------------------------------------------------- po
+
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "0": "\0"}
+
+
+def _unquote(text: str) -> str:
+    """把 .po 里的一行 `"..."` 解成真实字符串（含 C 转义）。"""
+    text = text.strip()
+    if len(text) < 2 or not text.startswith('"') or not text.endswith('"'):
+        return ""
+    body = text[1:-1]
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\" and i + 1 < len(body):
+            nxt = body[i + 1]
+            out.append(_ESCAPES.get(nxt, nxt))
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def parse_po(path: Path) -> dict[str, str]:
+    """解析 .po。只取 msgid/msgstr，跳过 msgctxt 和 fuzzy 条目。"""
+    catalog: dict[str, str] = {}
+    id_parts: list[str] = []
+    str_parts: list[str] = []
+    mode: str | None = None
+    fuzzy = False
+    saw_anything = False
+
+    def flush() -> None:
+        nonlocal id_parts, str_parts, mode, fuzzy, saw_anything
+        if mode is not None:
+            key = "".join(id_parts)
+            val = "".join(str_parts)
+            # 空 msgid 是头部，要保留；fuzzy 条目按约定不使用
+            if not fuzzy:
+                catalog[key] = val
+            saw_anything = True
+        id_parts, str_parts = [], []
+        mode = None
+        fuzzy = False
+
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            flush()
+            continue
+        if line.startswith("#"):
+            if line.startswith("#,") and "fuzzy" in line:
+                fuzzy = True
+            continue
+        if line.startswith("msgid "):
+            if mode is not None:
+                flush()
+            mode = "msgid"
+            id_parts.append(_unquote(line[len("msgid "):]))
+        elif line.startswith("msgstr "):
+            mode = "msgstr"
+            str_parts.append(_unquote(line[len("msgstr "):]))
+        elif line.startswith("msgctxt "):
+            # 本项目没用 pgettext，遇到就当空
+            mode = "msgctxt"
+        elif line.startswith('"'):
+            if mode == "msgid":
+                id_parts.append(_unquote(line))
+            elif mode == "msgstr":
+                str_parts.append(_unquote(line))
+        else:
+            raise ValueError(f"{path.name}: 看不懂的行：{raw!r}")
+    flush()
+
+    if not saw_anything:
+        raise ValueError(f"{path.name}: 一个条目都没有")
+    return catalog
+
+
+# --------------------------------------------------------------- 源码里的 msgid
+
+# 翻译取自这两个文件。只有写成**单个字符串字面量**的 _() 调用能被可靠提取，
+# 所以代码里有个约定：不要把拼接表达式传进 _()。
+# 例外是模块级常量（按钮标签就是），_RE_CONST_USE 会顺着常量名找到它的字面量。
+SOURCE_FILES = ("extension.js", "prefs.js")
+
+_RE_CALL = re.compile(r"""_\(\s*'((?:[^'\\]|\\.)*)'\s*\)""")
+_RE_CONST = re.compile(r"""^const\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*'((?:[^'\\]|\\.)*)'\s*;""")
+_RE_CONST_USE = re.compile(r"""_\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)""")
+
+# JS 源码里的转义 → 真实字符；msgid 是解码之后的字符串
+_JS_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "'": "'", '"': '"', "\\": "\\"}
+
+
+def _unescape_js(body: str) -> str:
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\" and i + 1 < len(body):
+            out.append(_JS_ESCAPES.get(body[i + 1], body[i + 1]))
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def source_msgids() -> dict[str, list[str]]:
+    """扫出源码里所有会被翻译的字符串，返回 {msgid: ["文件:行", ...]}。
+
+    抓两类：
+      · `_('literal')`   —— 直接写在调用里的
+      · `_(CONST)`       —— 引用模块级 `const CONST = 'literal';` 的
+                            （按钮标签 LABEL_IDLE / ARMED / BUSY 就是这种）
+    """
+    result: dict[str, list[str]] = {}
+    for name in SOURCE_FILES:
+        path = EXT_DIR / name
+        if not path.exists():
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines()
+
+        consts: dict[str, str] = {}
+        for line in lines:
+            m = _RE_CONST.match(line.strip())
+            if m:
+                consts[m.group(1)] = _unescape_js(m.group(2))
+
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith("*") or stripped.startswith("//"):
+                continue
+            for m in _RE_CALL.finditer(line):
+                result.setdefault(_unescape_js(m.group(1)), []).append(f"{name}:{i}")
+            for m in _RE_CONST_USE.finditer(line):
+                key = m.group(1)
+                if key in consts:
+                    result.setdefault(consts[key], []).append(f"{name}:{i}")
+    return result
+
+
+# --------------------------------------------------------------------------- mo
+
+
+def write_mo(catalog: dict[str, str], out_path: Path) -> int:
+    """把 {msgid: msgstr} 写成 .mo。返回字符串数。
+
+    布局（全部小端序）：
+        7 个 uint32 头 | 原文偏移表 | 译文偏移表 | 原文池 | 译文池
+    哈希表大小写 0 —— GLib 的 g_mo_lookup() 在 hash_tab_size <= 2 时改走
+    对原文表（已按字节序排序）的二分查找，结果完全一样，还省掉实现 GNU
+    gettext 那套哈希的麻烦。
+    """
+    keys = sorted(catalog.keys(), key=lambda k: k.encode("utf-8"))
+
+    offsets: list[tuple[int, int, int, int]] = []
+    ids = b""
+    strs = b""
+    for key in keys:
+        kb = key.encode("utf-8")
+        mb = catalog[key].encode("utf-8")
+        offsets.append((len(ids), len(kb), len(strs), len(mb)))
+        ids += kb + b"\x00"
+        strs += mb + b"\x00"
+
+    n = len(keys)
+    key_start = 7 * 4 + 16 * n
+    value_start = key_start + len(ids)
+
+    key_offsets: list[int] = []
+    value_offsets: list[int] = []
+    for o1, l1, o2, l2 in offsets:
+        key_offsets += [l1, o1 + key_start]
+        value_offsets += [l2, o2 + value_start]
+
+    blob = struct.pack(
+        "Iiiiiii",
+        MO_MAGIC,          # 魔数
+        0,                 # 格式版本
+        n,                 # 字符串条数
+        7 * 4,             # 原文偏移表位置
+        7 * 4 + n * 8,     # 译文偏移表位置
+        0,                 # 哈希表大小（0 = 让 GLib 二分）
+        0,                 # 哈希表位置
+    )
+    blob += array.array("i", key_offsets + value_offsets).tobytes()
+    blob += ids
+    blob += strs
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(blob)
+    return n
+
+
+def ensure_header(catalog: dict[str, str], lang: str) -> None:
+    """补上头部缺失的必需字段；缺 charset 的话 GLib 不会认这个 .mo。"""
+    header = catalog.get("", "")
+    fields: dict[str, str] = {}
+    order: list[str] = []
+    for line in header.splitlines():
+        if ":" in line:
+            k, _, v = line.partition(":")
+            fields[k.strip()] = v.strip()
+            order.append(k.strip())
+
+    for key, default in REQUIRED_HEADER.items():
+        if key not in fields:
+            fields[key] = default
+            order.append(key)
+    fields.setdefault("Language", lang)
+    if "Language" not in order:
+        order.append("Language")
+
+    catalog[""] = "".join(f"{k}: {fields[k]}\n" for k in order)
+
+
+# --------------------------------------------------------------------------- 主流程
+
+
+def verify_with_gjs(domain: str, lang: str, probe: str, expect: str) -> tuple[bool, str]:
+    """用 gjs 的 gettext 模块真的读一遍 .mo —— 这是唯一能证明 GLib 认它的办法。"""
+    script = (
+        "import {bindtextdomain, textdomain, gettext} from 'gettext';\n"
+        f"bindtextdomain({json.dumps(domain)}, {json.dumps(str(LOCALE_DIR))});\n"
+        f"textdomain({json.dumps(domain)});\n"
+        f"print(gettext({json.dumps(probe)}));\n"
+    )
+    env = dict(os.environ, LANG=f"{lang}.UTF-8", LANGUAGE=lang, LC_ALL=f"{lang}.UTF-8")
+
+    # 必须写成文件再 `gjs -m <file>`。`gjs -m -c '...'` 不行：它会把
+    # "<command line>" 当模块文件去解析然后失败，而且那种失败不带 SyntaxError
+    # 字样，很容易被 grep 判成"通过"（bin/build-extension 就踩过这个坑）。
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as fh:
+        fh.write(script)
+        tmp = fh.name
+    try:
+        proc = subprocess.run(
+            ["gjs", "-m", tmp], capture_output=True, text=True, env=env, timeout=30,
+        )
+    finally:
+        os.unlink(tmp)
+
+    got = proc.stdout.strip()
+    if proc.returncode != 0:
+        first = (proc.stderr.strip().splitlines() or ["(无输出)"])[0]
+        return False, f"gjs 失败：{first}"
+    return got == expect, f"gettext({probe!r}) → {got!r}（期望 {expect!r}）"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="编译 .po 到扩展的 locale/ 目录")
+    ap.add_argument("--check", action="store_true", help="只检查，不写文件")
+    ap.add_argument("--verify", action="store_true", help="编译后用 gjs 验证能读到")
+    ap.add_argument("--list-msgids", action="store_true",
+                    help="把源码里所有 msgid 以 JSON 打印出来后退出")
+    args = ap.parse_args()
+
+    if args.list_msgids:
+        print(json.dumps(source_msgids(), ensure_ascii=False, indent=2))
+        return 0
+
+    meta_path = EXT_DIR / "metadata.json"
+    if not meta_path.exists():
+        print(f"✗ 找不到 {meta_path}", file=sys.stderr)
+        return 1
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    domain = meta.get("gettext-domain") or meta["uuid"]
+
+    po_files = sorted(PO_DIR.glob("*.po")) if PO_DIR.is_dir() else []
+    if not po_files:
+        print(f"✗ {PO_DIR} 下没有 .po 文件", file=sys.stderr)
+        return 1
+
+    # 源码里出现的 msgid —— 用它来查 .po 有没有漏翻 / 有没有过期条目
+    src = source_msgids()
+
+    has_msgfmt = shutil.which("msgfmt") is not None
+    print(f"gettext 域：{domain}")
+    print(f"源码里的 msgid：{len(src)} 条")
+    print(f"编译器：{'系统 msgfmt' if has_msgfmt else '内置纯 Python 实现（本机没有 msgfmt）'}")
+    print()
+
+    failures: list[str] = []
+    for po in po_files:
+        lang = po.stem
+        out = LOCALE_DIR / lang / "LC_MESSAGES" / f"{domain}.mo"
+        try:
+            catalog = parse_po(po)
+        except ValueError as exc:
+            print(f"  ✗ {po.name}: {exc}")
+            failures.append(po.name)
+            continue
+
+        # 一致性检查：源码里有的必须在 .po 里，.po 里多出来的要提醒（可能已删代码）
+        missing = sorted(k for k in src if k not in catalog)
+        unused = sorted(k for k in catalog if k and k not in src)
+        for k in missing:
+            print(f"  ✗ {po.name}: 漏翻 {k!r}（源码 {', '.join(src[k])}）")
+        if unused:
+            print(f"  ! {po.name}: {len(unused)} 条已不在源码里（可以删了）")
+            for k in unused[:3]:
+                print(f"      {k!r}")
+        if missing:
+            failures.append(f"{po.name}(漏翻 {len(missing)} 条)")
+            continue
+
+        ensure_header(catalog, lang)
+        entries = len(catalog) - 1  # 减去头部
+        empty = [k for k, v in catalog.items() if k and not v]
+        if empty:
+            print(f"  ! {po.name}: {len(empty)} 条译文是空的（会回退到英文原文）")
+
+        if args.check:
+            print(f"  ✓ {po.name}: {entries} 条译文（只检查，未写文件）")
+            continue
+
+        if has_msgfmt:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            proc = subprocess.run(
+                ["msgfmt", "--check-format", "-o", str(out), str(po)],
+                capture_output=True, text=True,
+            )
+            if proc.returncode != 0:
+                print(f"  ✗ {po.name}: msgfmt 失败\n{proc.stderr.strip()}")
+                failures.append(po.name)
+                continue
+        else:
+            write_mo(catalog, out)
+
+        size = out.stat().st_size
+        print(f"  ✓ {po.name} → {out.relative_to(BASE_DIR)}  ({entries} 条, {size} 字节)")
+
+    if args.verify and not args.check:
+        print()
+        print("用 gjs 的 gettext 实际读一遍（证明 GLib 认这些 .mo）：")
+        for po in po_files:
+            lang = po.stem
+            catalog = parse_po(po)
+            # 挑一条非空译文来验；没有就跳过
+            probe = next((k for k, v in catalog.items() if k and v), None)
+            if probe is None:
+                print(f"  - {lang}: 没有可验证的条目，跳过")
+                continue
+            ok, detail = verify_with_gjs(domain, lang, probe, catalog[probe])
+            print(f"  {'✓' if ok else '✗'} {lang}: {detail}")
+            if not ok:
+                failures.append(f"{lang}(verify)")
+
+    print()
+    if failures:
+        print(f"✗ 有 {len(failures)} 项失败：{', '.join(failures)}")
+        return 1
+    print("✓ 全部完成")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -7,5 +7,6 @@
   ],
   "url": "https://github.com/PeppaPig-114514/WaylandOCR",
   "settings-schema": "org.gnome.shell.extensions.prtsc-ocr",
-  "version-name": "1.0.0"
+  "version-name": "1.0.0",
+  "gettext-domain": "prtsc-ocr"
 }

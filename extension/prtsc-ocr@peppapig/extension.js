@@ -94,9 +94,22 @@ const DRAGGED_PROP = '_prtscOcrDragged';
 
 /** 图标：Yaru 里有（经 Yaru-blue-dark → Yaru-blue → Yaru 继承链解析得到）。 */
 const ICON_NAME = 'insert-text-symbolic';
-const LABEL_IDLE = '提取文字';
-const LABEL_ARMED = '请框选…';
-const LABEL_BUSY = '识别中…';
+const LABEL_IDLE = 'Extract text';
+const LABEL_ARMED = 'Drag to select…';
+const LABEL_BUSY = 'Recognising…';
+
+/**
+ * Module-level translator.
+ *
+ * At module load time the gettext domain is not available yet — that happens when
+ * the Extension instance is constructed (the base class calls initTranslations(),
+ * see sharedInternals.js:59). So this starts as the identity function and is
+ * swapped for the real gettext in enable(), and swapped back in disable().
+ *
+ * Consequence: strings must be passed through _() **at use time**, never at
+ * module top level. That is why LABEL_* above hold msgids rather than text.
+ */
+let _ = (str) => str;
 
 /** 提示信息在按钮上停留的秒数。 */
 const HINT_SECONDS = 4;
@@ -139,7 +152,8 @@ function logInfo(msg) {
 /** 把异常压成能塞进按钮标签的短句。 */
 function shortReason(e) {
     const msg = `${e.message ?? e}`;
-    return msg.length > 14 ? `${msg.slice(0, 14)}…` : msg;
+    // 22 而不是 14：原文是按中文字宽定的，英文同样字符数信息量少得多
+    return msg.length > 22 ? `${msg.slice(0, 22)}…` : msg;
 }
 
 /**
@@ -165,7 +179,7 @@ function makeTypeButton(onClicked) {
     box.add_child(new St.Icon({icon_name: ICON_NAME}));
 
     const label = new St.Label({
-        text: LABEL_IDLE,
+        text: _(LABEL_IDLE),
         x_align: Clutter.ActorAlign.CENTER,
     });
     box.add_child(label);
@@ -181,12 +195,28 @@ export default class PrtscOcrExtension extends Extension {
         this._armed = false;
         this._hintId = 0;
 
+        // Translations come from locale/<lang>/LC_MESSAGES/<gettext-domain>.mo,
+        // compiled by bin/compile-locales. Never let a missing .mo break the UI:
+        // _() falls back to the English source string.
+        try {
+            this.initTranslations();
+            _ = (str) => {
+                try {
+                    return this.gettext(str);
+                } catch {
+                    return str;
+                }
+            };
+        } catch (e) {
+            logError(e, 'prtsc-ocr: gettext unavailable, keeping English strings');
+        }
+
         // 首选项里的 OCR 程序路径。schema 缺失时（例如用软链接装进来但没编译
         // schema）不能连累整个扩展——退化成默认路径照常用。
         try {
             this._settings = this.getSettings();
         } catch (e) {
-            logError(e, 'prtsc-ocr: 读不到设置 schema，改用默认 OCR 路径');
+            logError(e, 'prtsc-ocr: settings schema unavailable, using the default OCR path');
             this._settings = null;
         }
 
@@ -202,7 +232,7 @@ export default class PrtscOcrExtension extends Extension {
             try {
                 ext._onUIOpened(this);
             } catch (e) {
-                logError(e, 'prtsc-ocr: 准备按钮失败');
+                logError(e, 'prtsc-ocr: failed to prepare the button');
             }
             return result;
         };
@@ -211,10 +241,10 @@ export default class PrtscOcrExtension extends Extension {
         try {
             this._ensureButton(Main.screenshotUI);
         } catch (e) {
-            logError(e, 'prtsc-ocr: 添加按钮失败');
+            logError(e, 'prtsc-ocr: failed to add the button');
         }
 
-        logInfo('已启用');
+        logInfo('enabled');
     }
 
     disable() {
@@ -255,7 +285,8 @@ export default class PrtscOcrExtension extends Extension {
         this._busy = false;
         this._savedRect = null;
         this._settings = null;
-        logInfo('已停用');
+        _ = (str) => str;
+        logInfo('disabled');
     }
 
     // ---------------------------------------------------------------- 界面准备
@@ -280,7 +311,7 @@ export default class PrtscOcrExtension extends Extension {
 
         const button = ui[BUTTON_PROP];
         if (button) {
-            this._setLabel(button, LABEL_IDLE);
+            this._setLabel(button, _(LABEL_IDLE));
             button.reactive = true;
         }
     }
@@ -292,7 +323,7 @@ export default class PrtscOcrExtension extends Extension {
 
         const container = ui._typeButtonContainer;
         if (!container) {
-            logInfo('找不到 _typeButtonContainer，跳过（GNOME 内部结构可能变了）');
+            logInfo('_typeButtonContainer not found, skipping (GNOME internals may have changed)');
             return;
         }
 
@@ -305,7 +336,7 @@ export default class PrtscOcrExtension extends Extension {
 
         this._hookAreaSelector(ui);
 
-        logInfo('按钮已加入原生截图工具栏');
+        logInfo('button added to the native screenshot toolbar');
     }
 
     /**
@@ -464,7 +495,7 @@ export default class PrtscOcrExtension extends Extension {
             this._armed = false;
             this._restoreNativeSelection(ui);
             this._setSelectionVisible(ui, true);
-            this._setLabel(button, LABEL_IDLE);
+            this._setLabel(button, _(LABEL_IDLE));
             return;
         }
 
@@ -477,7 +508,7 @@ export default class PrtscOcrExtension extends Extension {
             this._armed = true;
             this._setSelectionVisible(ui, false);
             this._collapseNativeSelection(ui);
-            this._setLabel(button, LABEL_ARMED);
+            this._setLabel(button, _(LABEL_ARMED));
             return;
         }
 
@@ -499,18 +530,18 @@ export default class PrtscOcrExtension extends Extension {
             this._hintId = 0;
         }
 
-        this._setLabel(button, LABEL_BUSY);
+        this._setLabel(button, _(LABEL_BUSY));
 
         try {
             const bytes = await this._grabSelection(ui);
             if (!bytes) {
-                this._hint(button, '还没框选');
+                this._hint(button, _('Nothing selected yet'));
                 return;
             }
 
             const text = await this._ocrBytes(bytes);
             if (!text) {
-                this._hint(button, '没识别到文字');
+                this._hint(button, _('No text found'));
                 return;
             }
 
@@ -525,9 +556,12 @@ export default class PrtscOcrExtension extends Extension {
             // 再在收尾时 emit('closed')（screenshot.js:1716），所以挂 'closed' 正好。
             this._afterClose(ui, () => {
                 try {
-                    this._notify('提取文字', `已复制 ${chars} 个字符：${preview}`);
+                    const body = _('Copied {count} characters: {text}')
+                        .replace('{count}', chars)
+                        .replace('{text}', preview);
+                    this._notify(_('Extract text'), body);
                 } catch (e) {
-                    logError(e, 'prtsc-ocr: 关闭后发通知失败');
+                    logError(e, 'prtsc-ocr: failed to notify after close');
                 }
             });
 
@@ -536,13 +570,13 @@ export default class PrtscOcrExtension extends Extension {
         } catch (e) {
             logError(e, 'prtsc-ocr');
             this._hint(button, shortReason(e));
-            this._notify('提取文字失败', `${e.message ?? e}`);
+            this._notify(_('Extract text failed'), `${e.message ?? e}`);
         } finally {
             this._busy = false;
             button.reactive = true;
             // 没有留下临时提示才复位；有提示的话让 _hint 的定时器负责复位
             if (this._hintId === 0)
-                this._setLabel(button, LABEL_IDLE);
+                this._setLabel(button, _(LABEL_IDLE));
         }
     }
 
@@ -603,7 +637,7 @@ export default class PrtscOcrExtension extends Extension {
         this._hintId = GLib.timeout_add_seconds(
             GLib.PRIORITY_DEFAULT, HINT_SECONDS, () => {
                 this._hintId = 0;
-                this._setLabel(button, LABEL_IDLE);
+                this._setLabel(button, _(LABEL_IDLE));
                 return GLib.SOURCE_REMOVE;
             });
     }
@@ -632,14 +666,14 @@ export default class PrtscOcrExtension extends Extension {
                 .find(w => w.checked);
             const content = win?.windowContent;
             if (!content)
-                throw new Error('没选中窗口，或拿不到窗口画面');
+                throw new Error(_('No window selected, or its contents are unavailable'));
             texture = content.get_texture();
             scale = win.bufferScale ?? 1;
             geometry = null;
         } else {
             const content = ui._stageScreenshot?.get_content();
             if (!content)
-                throw new Error('没拿到屏幕冻结帧');
+                throw new Error(_('Could not grab the frozen screen frame'));
             texture = content.get_texture();
             scale = ui._scale ?? 1;
 
@@ -657,7 +691,7 @@ export default class PrtscOcrExtension extends Extension {
         }
 
         if (!texture)
-            throw new Error('拿到的画面是空的');
+            throw new Error(_('The captured frame is empty'));
 
         const stream = Gio.MemoryOutputStream.new_resizable();
         const [x, y, w, h] = geometry ?? [0, 0, -1, -1];
@@ -680,7 +714,7 @@ export default class PrtscOcrExtension extends Extension {
             if (custom)
                 return custom;
         } catch (e) {
-            logError(e, 'prtsc-ocr: 读 ocr-command 失败，用默认路径');
+            logError(e, 'prtsc-ocr: failed to read ocr-command, using the default path');
         }
 
         for (const candidate of OCR_PATH_CANDIDATES) {
@@ -697,7 +731,7 @@ export default class PrtscOcrExtension extends Extension {
         const ocrBin = this._resolveOcrBin();
 
         if (!GLib.file_test(ocrBin, GLib.FileTest.IS_EXECUTABLE))
-            throw new Error(`找不到 ${ocrBin}`);
+            throw new Error(`${_('OCR program not found')}: ${ocrBin}`);
 
         const [tmpFile] = Gio.File.new_tmp('prtsc-ocr-ext-XXXXXX.png');
         const path = tmpFile.get_path();
@@ -723,7 +757,7 @@ export default class PrtscOcrExtension extends Extension {
             if (status !== OCR_EXIT_OK) {
                 const lastLine = (stderr ?? '')
                     .trim().split('\n').filter(Boolean).pop();
-                throw new Error(lastLine || `OCR 退出码 ${status}`);
+                throw new Error(lastLine || `${_('OCR exited with status')} ${status}`);
             }
             return (stdout ?? '').trim();
         } finally {

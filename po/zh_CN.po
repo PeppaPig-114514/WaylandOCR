@@ -1,0 +1,64 @@
+# prtsc-ocr 的简体中文翻译。
+# 英文原文是 msgid（写在 extension.js / prefs.js 里），这里只放译文。
+# 改完必须重新编译：./bin/compile-locales --verify
+# 没装 gettext（本机就没有）也能编——脚本自带纯 Python 的 .mo 生成器。
+msgid ""
+msgstr ""
+"Project-Id-Version: prtsc-ocr 1.0.0\n"
+"Report-Msgid-Bugs-To: https://github.com/PeppaPig-114514/WaylandOCR/issues\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid "Extract text"
+msgstr "提取文字"
+
+msgid "Drag to select…"
+msgstr "请框选…"
+
+msgid "Recognising…"
+msgstr "识别中…"
+
+msgid "Nothing selected yet"
+msgstr "还没框选"
+
+msgid "No text found"
+msgstr "没识别到文字"
+
+msgid "Copied {count} characters: {text}"
+msgstr "已复制 {count} 个字符：{text}"
+
+msgid "Extract text failed"
+msgstr "提取文字失败"
+
+msgid "No window selected, or its contents are unavailable"
+msgstr "没选中窗口，或拿不到窗口画面"
+
+msgid "Could not grab the frozen screen frame"
+msgstr "没拿到屏幕冻结帧"
+
+msgid "The captured frame is empty"
+msgstr "拿到的画面是空的"
+
+msgid "OCR program not found"
+msgstr "找不到 OCR 程序"
+
+msgid "OCR exited with status"
+msgstr "OCR 退出码"
+
+msgid "Screenshot OCR"
+msgstr "截图 OCR"
+
+msgid "Recognition engine"
+msgstr "识别引擎"
+
+msgid "The “Extract text” button hands the selected area to this program.\nIt is called as `<program> --quiet <image path>`, and the result is read from stdout.\nExit code 0 means success, 2 means no text was found, anything else is a failure."
+msgstr "「提取文字」按钮会把框选的画面交给这个程序。\n调用方式是 `<程序> --quiet <图片路径>`，识别结果从标准输出读取。\n退出码 0 表示成功，2 表示图里没字，其它都算失败。"
+
+msgid "Leave this empty to search the following locations:"
+msgstr "留空则自动在下面这些位置里找："
+
+msgid "OCR program path"
+msgstr "OCR 程序路径"

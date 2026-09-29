@@ -84,6 +84,12 @@ cmd_install() {
         ok "schema 已编译：$SRC/schemas/gschemas.compiled"
     fi
 
+    # 翻译也一样：软链接安装不会自动编译 .po，得自己来（.mo 是 gitignore 的）
+    if [[ -x "$BASE_DIR/bin/compile-locales" ]]; then
+        "$BASE_DIR/bin/compile-locales" >/dev/null || die "翻译编译失败"
+        ok "翻译已编译：$SRC/locale/"
+    fi
+
     mkdir -p "$DEST_DIR"
     rm -rf "$DEST"
     ln -s "$SRC" "$DEST"
